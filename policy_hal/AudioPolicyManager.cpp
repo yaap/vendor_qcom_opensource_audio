@@ -1501,28 +1501,9 @@ audio_io_handle_t AudioPolicyManagerCustom::getOutputForDevices(
         } else if ((config->channel_mask == 1 || config->channel_mask == 3) &&
                    (config->sample_rate == 8000 || config->sample_rate == 16000 ||
                     config->sample_rate == 32000 || config->sample_rate == 48000)) {
-            //check if VoIP output is not opened already
-            bool voip_pcm_already_in_use = false;
-            for (size_t i = 0; i < mOutputs.size(); i++) {
-                 sp<SwAudioOutputDescriptor> desc = mOutputs.valueAt(i);
-                 if (desc->mFlags == (AUDIO_OUTPUT_FLAG_VOIP_RX | AUDIO_OUTPUT_FLAG_DIRECT)) {
-                     //close voip output if currently open by the same client with different device
-                     if (desc->mDirectClientSession == session &&
-                         desc->devices() != devices) {
-                         closeOutput(desc->mIoHandle);
-                     } else {
-                         voip_pcm_already_in_use = true;
-                         ALOGD("VoIP PCM already in use");
-                     }
-                     break;
-                 }
-            }
-
-            if (!voip_pcm_already_in_use) {
-                *flags = (audio_output_flags_t)(AUDIO_OUTPUT_FLAG_VOIP_RX |
+            *flags = (audio_output_flags_t)(AUDIO_OUTPUT_FLAG_VOIP_RX |
                                                AUDIO_OUTPUT_FLAG_DIRECT);
-                ALOGV("Set VoIP and Direct output flags for PCM format");
-            }
+            ALOGV("Set VoIP and Direct output flags for PCM format");
         }
     } /* voip flag override block end */
 
@@ -1701,7 +1682,8 @@ audio_io_handle_t AudioPolicyManagerCustom::getOutputForDevices(
         // prevent direct pcm for non-music stream blindly if direct pcm already in use
         // for other music stream concurrency is handled after checking direct ouput usage
         // and checking client
-        if (direct_pcm_already_in_use == true && stream != AUDIO_STREAM_MUSIC) {
+        if (direct_pcm_already_in_use == true && stream != AUDIO_STREAM_MUSIC &&
+            !(*flags & AUDIO_OUTPUT_FLAG_VOIP_RX)) {
             ALOGD("disabling offload for non music stream as direct pcm is already in use");
             *flags = (audio_output_flags_t)(AUDIO_OUTPUT_FLAG_NONE);
         }
@@ -1810,7 +1792,6 @@ audio_io_handle_t AudioPolicyManagerCustom::getOutputForDevices(
                      outputDesc->mDirectClientSession, session);
                      goto non_direct_output;
                 }
-                closeOutput(outputDesc->mIoHandle);
             }
         }
         if (!profile->canOpenNewIo()) {
@@ -1960,17 +1941,40 @@ status_t AudioPolicyManagerCustom::getInputForAttr(const audio_attributes_t *att
         }
     }
 
+    // This workaround prevents Sound Trigger capture streams from
+    // starting on USB headset. Sound Trigger is not supported on
+    // USB headset, so the capture streams should not select USB
+    // headset device. Temporarily remove USB headset devices from
+    // the available devices list while selecting device.
+    bool isSoundTrigger = inputSource == AUDIO_SOURCE_HOTWORD &&
+        mSoundTriggerSessions.indexOfKey(session) >= 0;
+    DeviceVector USBDevices = mAvailableInputDevices.getDevicesFromType(
+                AUDIO_DEVICE_IN_USB_HEADSET);
 
-    return AudioPolicyManager::getInputForAttr(attr,
-                                               input,
-                                               riid,
-                                               session,
-                                               uid,
-                                               config,
-                                               flags,
-                                               selectedDeviceId,
-                                               inputType,
-                                               portId);
+    if (isSoundTrigger) {
+        for (size_t i = 0; i < USBDevices.size(); i++) {
+            mAvailableInputDevices.remove(USBDevices[i]);
+        }
+    }
+
+    status_t status = AudioPolicyManager::getInputForAttr(attr,
+                                                          input,
+                                                          riid,
+                                                          session,
+                                                          uid,
+                                                          config,
+                                                          flags,
+                                                          selectedDeviceId,
+                                                          inputType,
+                                                          portId);
+
+    if (isSoundTrigger) {
+        for (size_t i = 0; i < USBDevices.size(); i++) {
+            mAvailableInputDevices.add(USBDevices[i]);
+        }
+    }
+
+    return status;
 }
 
 uint32_t AudioPolicyManagerCustom::activeNonSoundTriggerInputsCountOnDevices(audio_devices_t devices) const
